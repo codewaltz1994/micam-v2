@@ -73,6 +73,12 @@ docker compose up -d
      > 转推RTSP流地址，如: `rtsp://192.168.1.xx:8554/your_stream1`，8554为Go2rtc提供的RTSP服务
    - `VIDEO_CODEC`: Video Codec of the camera, `hevc`(default) or `h264`
    - `STREAM_CHANNEL`: Stream Channel of the camera, Default: `0`
+   - `ENABLE_AUDIO`: 是否把摄像头音频混入 RTSP 流，Default: `1`（`0` 关闭）
+     > 音频走 Miloco 独立的 `/ws/audio_stream` 端点，micam 订阅后转成 AAC 与视频一起推流。
+     > 支持 `g711a` / `g711u` / `pcm`；若相机上报 `opus`，日志会打印 `Unsupported audio codec`，此时只推视频。
+     > ⚠️ Miloco 1.x 没有音频端点（该端点是 2.0 才引入的），直接连会返回 403。需要改用
+     > `deploy/miloco-audio` 构建的派生镜像，它复用 SDK 的 `register_decode_pcm_async`
+     > 把 G.711 解成 16kHz/s16/mono 的 `pcm` 后再下发。
 
 2. Miloco:
    - `MILOCO_PORT`: Miloco listen port, Default: `8000`

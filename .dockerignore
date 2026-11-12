@@ -1,0 +1,15 @@
+.git
+.github
+.env
+.venv
+__pycache__/
+*.py[oc]
+.DS_Store
+
+# compose 运行时数据目录,不进镜像
+miloco/
+go2rtc/
+
+# 构建产物与部署补丁,不进镜像
+dist/
+deploy/
