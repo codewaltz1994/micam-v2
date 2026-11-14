@@ -253,7 +253,6 @@ Miloco 的登录状态与摄像头绑定保存在 `./miloco` 目录中，更新�
 本项目是在前人的工作上继续完善的，感谢以下贡献者：
 
 - [@al-one](https://github.com/al-one)：[miiot/micam](https://github.com/miiot/micam) 的作者。完成了 Miloco WebSocket → ffmpeg → RTSP 的转发核心、Docker 部署方案，以及默认启用高清流的 Miloco 镜像，本项目的所有功能都建立在这些工作之上。
-  如果这个项目对你有帮助，欢迎去 [赞助原作者](https://github.com/sponsors/al-one)。
 - [@wowtalon](https://github.com/wowtalon)：修复了 micam 容器内无法解析 `miloco` 主机名的问题（[miiot/micam#11](https://github.com/miiot/micam/pull/11)），即 compose 里的 `extra_hosts` 配置。
 - [Xiaomi Miloco](https://github.com/XiaoMi/xiaomi-miloco) 团队：提供摄像头接入能力和 SDK。本项目 Miloco 1.x 的音频补丁直接复用了 SDK 自带的解码能力，并参考了 2.x 的 `/ws/audio_stream` 协议。
 - [AlexxIT/go2rtc](https://github.com/AlexxIT/go2rtc)、[FFmpeg](https://ffmpeg.org/)：提供流媒体转发与编解码。
