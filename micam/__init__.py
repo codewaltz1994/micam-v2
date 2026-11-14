@@ -1,9 +1,11 @@
 import os
 import json
+import time
 import asyncio
 import aiohttp
 import argparse
 import logging
+import threading
 import subprocess
 from typing import Optional
 
@@ -40,6 +42,10 @@ AUDIO_PUMP_INTERVAL = 0.02
 AUDIO_JITTER_TARGET = 0.2  # 抖动缓冲: 攒够这么多再开始出真实音频
 AUDIO_JITTER_MAX = 1.0  # 超过就丢最旧的,回落到 target,防止延迟越积越大
 
+# 看门狗: 视频连续这么久没成功写进 ffmpeg(相机掉线、ffmpeg 卡死、事件循环被阻塞……)
+# 就直接结束进程,交给容器 restart 策略重连。用独立线程实现,事件循环卡死也能触发。
+STALL_TIMEOUT = 90.0
+
 
 class RTSPBridge:
     def __init__(
@@ -68,6 +74,31 @@ class RTSPBridge:
         self.audio_input: Optional[tuple] = None
         self.audio_fd: Optional[int] = None
         self.audio_buffer = bytearray()
+        self.audio_ready = asyncio.Event()
+        self.last_progress = time.monotonic()
+
+    def _watchdog(self):
+        while True:
+            time.sleep(5)
+            idle = time.monotonic() - self.last_progress
+            if idle < STALL_TIMEOUT:
+                continue
+            logger.error("No video written to FFmpeg for %.0fs, exiting for restart", idle)
+            process = self.process
+            if process is not None:
+                try:
+                    process.kill()
+                except OSError:
+                    pass
+            os._exit(1)
+
+    @staticmethod
+    def _log_ffmpeg_stderr(stream):
+        # 持续读走 stderr: 既能实时看到 ffmpeg 报错,也避免管道写满把 ffmpeg 卡住
+        for line in iter(stream.readline, b""):
+            line = line.decode(errors="replace").rstrip()
+            if line:
+                logger.error("FFmpeg: %s", line)
 
     async def _login(self) -> bool:
         """Login and retrieve access token."""
@@ -148,6 +179,9 @@ class RTSPBridge:
             stderr=subprocess.PIPE,  # Capture stderr for debugging if needed
             pass_fds=pass_fds,
         )
+        threading.Thread(
+            target=self._log_ffmpeg_stderr, args=(self.process.stderr,), daemon=True
+        ).start()
         if pass_fds:
             # 读端已交给 ffmpeg,父进程不再持有,否则写端永远等不到 EOF
             os.close(pass_fds[0])
@@ -175,44 +209,31 @@ class RTSPBridge:
         return f"{protocol}://{host}{path}?camera_id={self.camera_id}&channel={self.channel}"
 
     async def _open_audio_stream(self) -> Optional[aiohttp.ClientWebSocketResponse]:
-        """订阅音频 WS 并等待 init 信令拿到编码;拿不到就只推视频。"""
+        """订阅音频 WS;连不上就只推视频。init 信令由 _audio_loop 接收。"""
         ws_url = self._ws_url("/api/miot/ws/audio_stream")
         logger.info(f"Connecting to audio WebSocket: {ws_url}")
         try:
-            ws = await self.session.ws_connect(ws_url, ssl=False)
+            return await self.session.ws_connect(ws_url, ssl=False)
         except Exception as e:
             logger.warning(f"Audio stream unavailable, streaming video only: {e}")
             return None
 
-        try:
-            msg = await asyncio.wait_for(ws.receive(), timeout=AUDIO_INIT_TIMEOUT)
-        except asyncio.TimeoutError:
-            logger.warning("Audio init timeout (camera may have no audio), video only")
-            await ws.close()
-            return None
-        except Exception as e:
-            logger.warning(f"Audio init failed, video only: {e}")
-            await ws.close()
-            return None
-
+    def _parse_audio_init(self, msg) -> bool:
         if msg.type != aiohttp.WSMsgType.TEXT:
             logger.warning(f"Unexpected audio init message type: {msg.type}, video only")
-            await ws.close()
-            return None
+            return False
 
         try:
             init = json.loads(msg.data)
         except (TypeError, ValueError):
             logger.warning(f"Invalid audio init message: {msg.data!r}, video only")
-            await ws.close()
-            return None
+            return False
 
         codec = str(init.get("codec") or "").lower()
         audio_format = AUDIO_INPUT_FORMATS.get(codec)
         if audio_format is None:
             logger.warning(f"Unsupported audio codec '{codec}', streaming video only")
-            await ws.close()
-            return None
+            return False
 
         # 采样率/声道以服务端 init 为准,ffmpeg 解裸流时这两个参数不能猜
         audio_fmt, default_rate, default_channels = audio_format
@@ -224,7 +245,26 @@ class RTSPBridge:
 
         self.audio_input = (audio_fmt, rate, channels)
         logger.info(f"Audio codec: {codec} ({rate} Hz, {channels} ch)")
-        return ws
+        return True
+
+    async def _wait_audio_ready(self, audio_task: asyncio.Task) -> bool:
+        """首个关键帧到达时再等音频 init。
+
+        相机掉线期间重连时音视频都没数据,如果一连上就限时等 init,会把「相机离线」
+        误判成「相机没音频」,相机恢复后就一直只有画面没声音。
+        """
+        if not self.audio_ready.is_set() and not audio_task.done():
+            waiter = asyncio.create_task(self.audio_ready.wait())
+            await asyncio.wait(
+                {waiter, audio_task},
+                timeout=AUDIO_INIT_TIMEOUT,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            waiter.cancel()
+        if self.audio_ready.is_set() and not audio_task.done():
+            return True
+        logger.warning("No audio from camera, streaming video only")
+        return False
 
     def _audio_bytes_per_sec(self) -> tuple:
         audio_fmt, rate, channels = self.audio_input
@@ -233,12 +273,24 @@ class RTSPBridge:
         return rate, frame_bytes, silence
 
     async def _audio_loop(self):
-        """收音频 WS 的裸音频包放进抖动缓冲,真正写管道由 _audio_pump 按节拍完成。"""
+        """先收 init 信令确定编码,之后把裸音频包放进抖动缓冲,真正写管道由 _audio_pump 按节拍完成。
+
+        建连后就一直在 receive,既能及时回服务端的 ping,也能在等关键帧期间先攒好 init。
+        """
         ws = self.audio_ws
-        rate, frame_bytes, _ = self._audio_bytes_per_sec()
-        max_bytes = int(rate * AUDIO_JITTER_MAX) * frame_bytes
-        target_bytes = int(rate * AUDIO_JITTER_TARGET) * frame_bytes
         try:
+            try:
+                msg = await asyncio.wait_for(ws.receive(), timeout=AUDIO_DATA_TIMEOUT)
+            except asyncio.TimeoutError:
+                logger.warning("Audio init timeout (camera may have no audio)")
+                return
+            if not self._parse_audio_init(msg):
+                return
+            self.audio_ready.set()
+
+            rate, frame_bytes, _ = self._audio_bytes_per_sec()
+            max_bytes = int(rate * AUDIO_JITTER_MAX) * frame_bytes
+            target_bytes = int(rate * AUDIO_JITTER_TARGET) * frame_bytes
             while True:
                 try:
                     msg = await asyncio.wait_for(ws.receive(), timeout=AUDIO_DATA_TIMEOUT)
@@ -267,9 +319,11 @@ class RTSPBridge:
                 else:
                     logger.debug("Unexpected audio message type: %s", msg.type)
         finally:
-            # 音轨断了不降级成"有画面没声音":收掉 ffmpeg,交由容器重启策略重连
+            # 音轨断了不降级成"有画面没声音":收掉 ffmpeg,交由容器重启策略重连。
+            # ffmpeg 还没挂上音频输入(仍在等关键帧)时不动它,由 run 决定是否降级纯视频
             logger.info("Audio stream finished")
-            self._stop_ffmpeg()
+            if self.audio_fd is not None:
+                self._stop_ffmpeg()
 
     async def _audio_pump(self):
         """按真实时间往 ffmpeg 音频管道写数据,保证音频时间线 == 流逝时间。
@@ -328,18 +382,19 @@ class RTSPBridge:
     async def run(self):
         """Main loop to connect to WebSocket and pipe data."""
         jar = aiohttp.CookieJar(unsafe=True)
+        self.last_progress = time.monotonic()
+        threading.Thread(target=self._watchdog, daemon=True).start()
         async with aiohttp.ClientSession(cookie_jar=jar) as session:
             self.session = session
             if not await self._login():
                 return
 
-            # 音频是独立端点,先握手拿到编码,再决定 ffmpeg 挂不挂第二路输入
+            # 音频是独立端点,先订阅上;编码等首个关键帧到了再定,再决定 ffmpeg 挂不挂第二路输入
+            audio_task: Optional[asyncio.Task] = None
             if self.enable_audio:
                 self.audio_ws = await self._open_audio_stream()
-            self._start_ffmpeg()
-            audio_task = (
-                asyncio.create_task(self._audio_loop()) if self.audio_ws else None
-            )
+                if self.audio_ws is not None:
+                    audio_task = asyncio.create_task(self._audio_loop())
             pump_task: Optional[asyncio.Task] = None
 
             ws_url = self._ws_url("/api/miot/ws/video_stream")
@@ -366,6 +421,14 @@ class RTSPBridge:
                                     if self._is_keyframe(msg.data):
                                         logger.info("Keyframe detected! Starting stream...")
                                         self.waiting_for_keyframe = False
+                                        if audio_task is not None and not await self._wait_audio_ready(audio_task):
+                                            audio_task.cancel()
+                                            await asyncio.gather(audio_task, return_exceptions=True)
+                                            audio_task = None
+                                            self.audio_input = None
+                                            await self.audio_ws.close()
+                                            self.audio_ws = None
+                                        self._start_ffmpeg()
                                         if audio_task is not None:
                                             # 音频时间线从第一帧视频写入时起算,两路起点对齐
                                             pump_task = asyncio.create_task(self._audio_pump())
@@ -373,13 +436,12 @@ class RTSPBridge:
                                         logger.debug("Skipping non-keyframe data...")
                                         continue
                                 await asyncio.wait_for(self.process_write(msg.data), timeout=30.0)
+                                self.last_progress = time.monotonic()
                             except asyncio.TimeoutError:
                                 logger.error("Write data to process timeout.")
-                                await self.process_stderr()
                                 break
                             except BrokenPipeError as e:
                                 logger.error("FFmpeg process terminated unexpectedly. %s", e)
-                                await self.process_stderr()
                                 break
                         elif msg.type == aiohttp.WSMsgType.ERROR:
                             logger.error(f"WebSocket connection closed with error {ws.exception()}")
@@ -436,25 +498,17 @@ class RTSPBridge:
         return True
 
     async def process_write(self, data):
-        if not self.process:
-            raise RuntimeError("Process not started")
-        if not self.process.stdin:
-            raise RuntimeError("Process has no stdin")
+        process = self.process
+        if not process or not process.stdin:
+            # 音频那边已把 ffmpeg 收掉
+            raise BrokenPipeError("FFmpeg not running")
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, self._process_write, data)
+        await loop.run_in_executor(None, self._process_write, process.stdin, data)
 
-    def _process_write(self, data):
-        self.process.stdin.write(data)
-        self.process.stdin.flush()
-
-    async def process_stderr(self):
-        if not self.process:
-            raise RuntimeError("Process not started")
-        if not self.process.stderr:
-            return
-        stderr = self.process.stderr.read().decode()
-        if stderr:
-            logger.error(f"FFmpeg stderr: %s", stderr)
+    @staticmethod
+    def _process_write(stdin, data):
+        stdin.write(data)
+        stdin.flush()
 
 
 def main():
