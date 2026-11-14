@@ -19,6 +19,10 @@ on:
     # 每周跟进一次上游基础镜像
     - cron: "0 23 * * 0"
 
+permissions:
+  contents: read
+  packages: write
+
 env:
   GITHUB_CR_REPO: ghcr.io/${{ github.repository_owner }}/miloco-audio
   BASE_IMAGE: ${{ github.event.inputs.base_image || 'ghcr.io/miiot/miloco:main' }}
