@@ -514,11 +514,11 @@ class RTSPBridge:
 def main():
     parser = argparse.ArgumentParser(description="Bridge WebSocket video stream to RTSP")
     parser.add_argument("--base-url", default="", help="Base URL of the Miloco server")
-    parser.add_argument("--username", default="admin", help="Login username")
+    parser.add_argument("--username", default="", help="Login username")
     parser.add_argument("--password", default="", help="Login password (MD5)")
     parser.add_argument("--camera-id", default="", help="Camera ID to stream")
     parser.add_argument("--channel", default="", help="Camera channel")
-    parser.add_argument("--video-codec", default="hevc", help="Input video codec (hevc or h264)")
+    parser.add_argument("--video-codec", default="", help="Input video codec (hevc or h264)")
     parser.add_argument("--rtsp-url", default="", help="Target RTSP URL")
     parser.add_argument("--no-audio", action="store_true", help="Bridge video only, skip audio")
 
