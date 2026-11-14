@@ -258,6 +258,22 @@ Miloco 的登录状态与摄像头绑定保存在 `./miloco` 目录中，更新�
 - [AlexxIT/go2rtc](https://github.com/AlexxIT/go2rtc)、[FFmpeg](https://ffmpeg.org/)：提供流媒体转发与编解码。
 
 
+## ☕ Sponsor
+
+如果这个项目帮你听到了摄像头的声音，或者省下了半夜重启容器的时间，欢迎请作者喝杯咖啡 ☕
+
+<table>
+  <tr>
+    <th>支付宝</th>
+    <th>微信支付</th>
+  </tr>
+  <tr>
+    <td><img src="assets/sponsor/alipay.jpg" alt="支付宝收款码" width="240"></td>
+    <td><img src="assets/sponsor/wechat.jpg" alt="微信收款码" width="240"></td>
+  </tr>
+</table>
+
+
 ## 📄 License
 
 [Apache-2.0](LICENSE)，与上游 miiot/micam 一致。
