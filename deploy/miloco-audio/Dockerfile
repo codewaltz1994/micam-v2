@@ -9,8 +9,11 @@
 #   docker buildx build --platform linux/arm64 -t miloco:local-arm64 --load .
 #
 # 补丁脚本锚点不匹配会以非 0 退出，构建直接失败——不会产出"看着正常但没声音"的镜像。
+#
+# 基础镜像默认走国内镜像站；GitHub Actions 里用 --build-arg BASE_IMAGE=ghcr.io/miiot/miloco:main
 
-FROM ghcr.nju.edu.cn/miiot/miloco:main
+ARG BASE_IMAGE=ghcr.nju.edu.cn/miiot/miloco:main
+FROM ${BASE_IMAGE}
 
 # 新增端点模块 + 两个就地补丁脚本
 COPY audio_controller.py /app/miloco_server/controller/audio_controller.py

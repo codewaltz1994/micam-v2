@@ -36,32 +36,53 @@ init 只在**首帧到达时**发送（与 2.x 一致）。相机没有音频帧
 
 补丁脚本对锚点做精确匹配，上游代码一旦变化会**构建失败**，不会产出"看着正常但没声音"的镜像。
 
-## 构建
+## 获取镜像
+
+GitHub Actions（[docker-miloco-audio.yaml](../../.github/workflows/docker-miloco-audio.yaml)）在本目录有改动时
+以及每周自动构建 amd64/arm64 多架构镜像：
+
+```
+ghcr.io/codewaltz1994/miloco-audio:main        # 国内：ghcr.nju.edu.cn/codewaltz1994/miloco-audio:main
+```
+
+根目录 `docker-compose.yml` 默认就用它，一般无需自己构建。
+
+## 本地构建
 
 ```bash
-cd micam/deploy/miloco-audio
+cd deploy/miloco-audio
 
+# 基础镜像默认 ghcr.nju.edu.cn/miiot/miloco:main；海外网络加 --build-arg BASE_IMAGE=ghcr.io/miiot/miloco:main
 # 与服务器架构对应（NAS 常见 arm64；x86 用 amd64）
 docker buildx build --platform linux/arm64 -t miloco:local-arm64 --load .
 docker buildx build --platform linux/amd64 -t miloco:local-amd64 --load .
 
-# 打成 tar 交付（tag 必须是 compose 里引用的 miloco:local）
+# 打成 tar 交付（tag 必须与 compose 中 MILOCO_IMAGE 一致）
 docker tag miloco:local-arm64 miloco:local && docker save miloco:local | gzip -1 > ../../dist/miloco-linux-arm64.tar.gz
 docker tag miloco:local-amd64 miloco:local && docker save miloco:local | gzip -1 > ../../dist/miloco-linux-amd64.tar.gz
 ```
 
 ## 部署
 
+用 GHCR 镜像：
+
+```bash
+docker compose pull miloco micam1
+docker compose up -d --force-recreate miloco micam1
+```
+
+用离线 tar 包：
+
 ```bash
 # 1) 服务器上导入两个镜像（架构按机器实际选）
 gunzip -c miloco-linux-arm64.tar.gz | docker load     # miloco:local
 gunzip -c micam-linux-arm64.tar.gz  | docker load     # micam:local
 
-# 2) 确认 online 里 miloco.image = miloco:local、micam1.image = micam:local
-docker compose -f online config | grep image
+# 2) .env 中设置 MILOCO_IMAGE=miloco:local、MICAM_IMAGE=micam:local，确认生效
+docker compose config | grep image
 
 # 3) 重建容器（miloco 数据卷 ./miloco 不动，登录态和配置都保留）
-docker compose -f online up -d --force-recreate miloco micam1 micam2 micam3 micam4
+docker compose up -d --force-recreate
 ```
 
 ## 验证
@@ -99,7 +120,7 @@ docker run --rm -e PYTHONPATH=/app \
 
 | 现象 | 原因 |
 | --- | --- |
-| 仍报 403 | miloco 容器还是老镜像：`docker compose -f online up -d --force-recreate miloco` 后确认 `docker inspect miloco --format '{{.Config.Image}}'` |
+| 仍报 403 | miloco 容器还是老镜像：`docker compose up -d --force-recreate miloco` 后确认 `docker inspect miloco --format '{{.Config.Image}}'` |
 | 连上了但一直没声音 | 相机端关闭了拾音/录音；或码流是 OPUS（1.x 的 `_on_audio_callback` 只对 OPUS 建解码器，但 resampler 固定值是否匹配需另测）。先看 miloco 日志有没有 `audio decoder created` |
 | micam 日志 `Unsupported audio codec 'opus'` | 服务端把原始 codec 原样下发（2.x 行为）。本补丁固定下发 `pcm`，出现这个说明连的不是本镜像 |
 | 音频断了几十秒后画面重启 | 音频 WS 60s 无数据时 micam 会主动收掉 ffmpeg 交给容器重启，属预期降级路径 |
@@ -107,8 +128,8 @@ docker run --rm -e PYTHONPATH=/app \
 ## 回滚
 
 ```bash
-# online 里把 miloco.image 改回 ghcr.nju.edu.cn/miiot/miloco:main
-docker compose -f online up -d --force-recreate miloco
+# .env 中设置 MILOCO_IMAGE=ghcr.nju.edu.cn/miiot/miloco:main
+docker compose up -d --force-recreate miloco
 ```
 
 回滚后 micam 会重新降级为纯视频（`ENABLE_AUDIO=0` 可直接关掉音频订阅）。

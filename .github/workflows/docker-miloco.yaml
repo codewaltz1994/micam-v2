@@ -7,8 +7,6 @@ on:
         description: Version
         required: false
         default: ''
-  schedule:
-    - cron: "0 23 * * *"
 
 env:
   GITHUB_CR_REPO: ghcr.io/${{ github.repository_owner }}/miloco

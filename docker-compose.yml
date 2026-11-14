@@ -4,11 +4,9 @@ services:
   miloco:
     container_name: miloco
     # image: ghcr.nju.edu.cn/xiaomi/miloco-backend # Official image
-    # 上游 miiot/miloco:main 是 1.x，只有 /ws/video_stream；音频端点
-    # /ws/audio_stream 是 2.0 才有的，micam 连它会拿到 403 → 没声音。
-    # 用 deploy/miloco-audio 构建的派生镜像补上该端点：
-    #   docker build -t miloco:local deploy/miloco-audio
-    image: miloco:local # Modified image to using HD stream + audio backport
+    # 上游 miiot/miloco:main 是 1.x，只有 /ws/video_stream，没有音频端点。
+    # miloco-audio = 1.x + /ws/audio_stream 补丁（源码见 deploy/miloco-audio）
+    image: ${MILOCO_IMAGE:-ghcr.nju.edu.cn/codewaltz1994/miloco-audio:main}
     network_mode: host
     environment:
       BACKEND_PORT: ${MILOCO_PORT:-8000}
@@ -34,12 +32,7 @@ services:
       - ./go2rtc:/config     # folder for go2rtc.yaml file (edit from WebUI)
 
   micam1: &micam
-    # 本仓库代码已加入音频桥接(独立订阅 /ws/audio_stream),需本地构建:
-    #   docker compose build micam1 && docker compose up -d
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: micam:local
+    image: ${MICAM_IMAGE:-ghcr.nju.edu.cn/codewaltz1994/micam-v2:main}
     depends_on: [miloco, go2rtc]
     environment: &micam_envs
       MILOCO_BASE_URL: ${MILOCO_BASE_URL:-https://miloco:8000}
@@ -50,6 +43,7 @@ services:
       STREAM_CHANNEL: ${STREAM_CHANNEL:-0}
       ENABLE_AUDIO: ${ENABLE_AUDIO:-1}
       TZ: ${TZ:-Asia/Shanghai}
+    # 必须保留：断线/卡死时 micam 会主动退出，靠重启策略自愈
     restart: always
     extra_hosts:
       - "miloco:${MILOCO_HOST_IP:-host-gateway}"
